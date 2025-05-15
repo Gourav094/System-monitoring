@@ -48,7 +48,7 @@ context = ssl.create_default_context()
 
 # Use SSL (port 465) instead of starttls (port 587)
 with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as smtp:
-    smtp.login('garggourav012@gmail.com', 'zlox ajyq llie iqvf')  # use app password
+    smtp.login('garggourav012@gmail.com', 'app_password')  # use app password
     smtp.send_message(msg)
 
 print("✅ Email sent successfully.")
