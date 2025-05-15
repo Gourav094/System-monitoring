@@ -1,0 +1,23 @@
+[3J[H[2J-e [0;36m==================================================[0m
+-e [0;36m      System Doctor - Cleanup & Health Script     [0m
+-e [0;36m==================================================[0m
+-e Started at: Thu May 15 12:42:41 IST 2025
+-e Log file: /Users/I528930/system-doctor-2025-05-15.log
+
+-e 2025-05-15 12:42:41 - Script started
+-e [0;33m⚠ Not running as root. Some cleaning operations may fail.[0m
+-e 2025-05-15 12:42:41 - WARNING: Not running as root. Some cleaning operations may fail.
+-e 2025-05-15 12:42:41 - Script running without root privileges
+Usage: /Users/I528930/Documents/project/system-doctor/system.sh {backup|clean|analyze-disk|analyze-resources|suggest|dashboard|full|help}
+
+Commands:
+  --backup             - Create backup of /etc, /home, /var
+  --clean              - Clean temporary files
+  --analyze-disk       - Show disk usage
+  --analyze-resources  - Show memory and CPU usage
+  --suggest            - Recommend cleanup options
+  --dashboard          - Show system summary
+  --system-process     - Manage system processes
+  --send-email         - Send email report
+  --all               - Run full diagnostic and cleanup
+  --help               - Show this help message

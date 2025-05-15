@@ -1,0 +1,36 @@
+body {
+    font-family: Arial, sans-serif;
+    padding: 20px;
+}
+
+.data {
+    margin-bottom: 10px;
+}
+
+.data span {
+    font-weight: bold;
+}
+
+.warning {
+    color: red;
+}
+
+canvas {
+    max-width: 100%;
+    margin-top: 20px;
+}
+.network-interface {
+    padding: 10px;
+    border: 1px solid #ccc;
+    margin-bottom: 10px;
+    border-radius: 5px;
+}
+
+.network-interface strong {
+    font-size: 1.2em;
+    color: #333;
+}
+
+.network-interface br {
+    margin: 5px 0;
+}

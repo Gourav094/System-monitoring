@@ -28,11 +28,18 @@ JSON_FILE="monitor_data.json"
 PORT=8082
 HISTORY_FILE="usage_history.csv"
 
+UPDATE_INTERVAL=2
+CPU_THRESHOLD=80
+MEMORY_THRESHOLD=80
+DISK_THRESHOLD=85
+
 # Email configuration
 SEND_EMAIL=true 
 EMAIL_RECIPIENT=""
 EMAIL_SUBJECT="System Doctor Report - $(hostname) - $(date +%Y-%m-%d)"
 EMAIL_REPORT_FILE="/tmp/system-doctor-report-$(date +%Y-%m-%d).txt"
+
+
 
 # Function to log messages
 log_message() {
@@ -220,28 +227,38 @@ analyze_disk_usage() {
         fi
     fi
     
-    # Find largest directories in home
-    echo -e "\n${YELLOW}Largest directories in $HOME:${NC}"
-    large_dirs=$(du -sh "$HOME"/* 2>/dev/null | sort -rh | head -n 10)
-    echo "$large_dirs"
-    
-    # Also write to email report if enabled
-    if [ "$SEND_EMAIL" = true ]; then
-        echo -e "\nLargest directories in $HOME:" >> "$EMAIL_REPORT_FILE"
-        echo "$large_dirs" >> "$EMAIL_REPORT_FILE"
+    read -rp $'\nDo you want to see the largest Directories? (y/n): ' show_dir
+    if [[ "$show_dir" =~ ^[Yy]$ ]]; then
+        # Find largest directories in home
+        echo -e "\n${YELLOW}Largest directories in $HOME:${NC}"
+        large_dirs=$(du -sh "$HOME"/* 2>/dev/null | sort -rh | head -n 10)
+        echo "$large_dirs"
+        
+        # Also write to email report if enabled
+        if [ "$SEND_EMAIL" = true ]; then
+            echo -e "\nLargest directories in $HOME:" >> "$EMAIL_REPORT_FILE"
+            echo "$large_dirs" >> "$EMAIL_REPORT_FILE"
+        fi
+    else
+        echo "Skipping largest dir listing."
     fi
-    
-    # Find largest files over 100MB
-    echo -e "\n${YELLOW}Largest files (>100MB):${NC}"
-    large_files=$(find "$HOME" -type f -size +100M -exec ls -lh {} \; 2>/dev/null | sort -k 5 -rh | head -n 5 | awk '{print $5 " " $9}')
-    echo "$large_files"
-    
-    # Also write to email report if enabled
-    if [ "$SEND_EMAIL" = true ]; then
-        echo -e "\nLargest files (>100MB):" >> "$EMAIL_REPORT_FILE"
-        echo "$large_files" >> "$EMAIL_REPORT_FILE"
+
+    read -rp $'\nDo you want to see the largest files (>100MB)? (y/n): ' show_files
+    if [[ "$show_files" =~ ^[Yy]$ ]]; then
+        # Find largest files over 100MB
+        echo -e "\n${YELLOW}Largest files (>100MB):${NC}"
+        large_files=$(find "$HOME" -type f -size +100M -exec ls -lh {} \; 2>/dev/null | sort -k 5 -rh | head -n 5 | awk '{print $5 " " $9}')
+        echo "$large_files"
+        
+        # Also write to email report if enabled
+        if [ "$SEND_EMAIL" = true ]; then
+            echo -e "\nLargest files (>100MB):" >> "$EMAIL_REPORT_FILE"
+            echo "$large_files" >> "$EMAIL_REPORT_FILE"
+        fi
+    else
+        echo "Skipping largest files listing."
     fi
-    
+
     # Check for old log files
     echo -e "\n${YELLOW}Old log files that might be cleared:${NC}"
     old_logs=$(find /var/log -type f -name "*.log.*" -o -name "*.gz" -o -name "*.old" 2>/dev/null | head -n 5)
@@ -420,21 +437,12 @@ send_email_report() {
 
         python3 send_email.py "$EMAIL_RECIPIENT" "$EMAIL_REPORT_FILE"
 
-        # Send email using msmtp
-#         if cat <<EOF | msmtp "$EMAIL_RECIPIENT"
-# Subject: $EMAIL_SUBJECT
-# From: $EMAIL_SENDER
-# To: $EMAIL_RECIPIENT
-
-# $(cat "$EMAIL_REPORT_FILE")
-# EOF
-#         then
-#             success "Email report sent to $EMAIL_RECIPIENT"
-#         else
-#             error "Failed to send email report"
-#         fi
-
-        # rm -f "$EMAIL_REPORT_FILE"
+        if(( $? == 0)); then
+            success "Email report sent to $EMAIL_RECIPIENT"
+        else
+            error "Failed to send email report"
+        fi
+        
     fi
 }
 
@@ -443,25 +451,191 @@ usage() {
     echo -e "${BLUE}Usage:${NC} $0 {setup_email|create_backup|clean_temp_files|analyze_disk_usage|analyze_system_resources|all}"
 }
 
+record_history() {
+    TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$TIMESTAMP,$1,$2" >> $HISTORY_FILE
+}
+
+collect_data() {
+    while true; do
+        TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+        CPU=$(top -l 1 | awk '/CPU usage/ {print $3}' | cut -d'%' -f1)
+
+        MEMORY_USED=$(vm_stat | awk '
+            /Pages active/ {active=$3*4096/1024/1024}
+            /Pages wired down/ {wired=$3*4096/1024/1024}
+            END {printf "%.2f", active + wired}')
+        TOTAL_MEMORY=$(sysctl -n hw.memsize)
+        TOTAL_MB=$((TOTAL_MEMORY / 1024 / 1024))
+        MEM_PERCENT=$(echo "scale=2; ($MEMORY_USED / $TOTAL_MB) * 100" | bc)
+
+        DISK_USAGE=$(df -H / | awk 'NR==2 {print $5}' | sed 's/%//')
+
+        BATTERY_PERCENT=$(pmset -g batt | grep -Eo "\d+%" | tr -d '%')
+
+        NETWORK_JSON=""
+        interfaces=($(networksetup -listallhardwareports | awk '/Device/ {print $2}'))
+        for iface in "${interfaces[@]}"; do
+            RX=$(netstat -ibn | awk -v dev="$iface" '$1 == dev && $7 ~ /^[0-9]+$/ {rx+=$7} END {print rx+0}')
+            TX=$(netstat -ibn | awk -v dev="$iface" '$1 == dev && $10 ~ /^[0-9]+$/ {tx+=$10} END {print tx+0}')
+            [[ -z "$RX" ]] && RX="0"
+            [[ -z "$TX" ]] && TX="0"
+            NETWORK_JSON="$NETWORK_JSON\"$iface\":{\"rx\":\"$RX bytes\",\"tx\":\"$TX bytes\"},"
+        done
+        NETWORK_JSON="{${NETWORK_JSON%,}}"
+
+        INTRUSIONS=$(last | grep "invalid" | wc -l)
+        UPTIME=$(uptime | awk -F'(up |,  load average: )' '{print $2}')
+
+        # Calculate Health Score (example: based on thresholds for CPU, memory, and disk usage)
+        HEALTH_SCORE=100
+        if (( ${CPU%.*} > 80 )); then
+            HEALTH_SCORE=$((HEALTH_SCORE - 20))  # Deduct points for high CPU usage
+        fi
+        if (( ${MEM_PERCENT%.*} > 80 )); then
+            HEALTH_SCORE=$((HEALTH_SCORE - 20))  # Deduct points for high memory usage
+        fi
+        if (( DISK_USAGE > 85 )); then
+            HEALTH_SCORE=$((HEALTH_SCORE - 20))  # Deduct points for high disk usage
+        fi
+
+        # Save the data to JSON
+        echo "{
+            \"timestamp\": \"$TIMESTAMP\",
+            \"cpu\": \"$CPU\",
+            \"memory\": {
+                \"percent\": \"$MEM_PERCENT\",
+                \"used\": \"$MEMORY_USED\",
+                \"total\": \"$TOTAL_MB\"
+            },
+            \"disk\": \"$DISK_USAGE%\",
+            \"network\": $NETWORK_JSON,
+            \"battery\": $BATTERY_PERCENT,
+            \"uptime\": \"$UPTIME\",
+            \"intrusions\": \"$INTRUSIONS\",
+            \"health_score\": \"$HEALTH_SCORE\"
+        }" > $JSON_FILE
+
+        record_history "$CPU" "$MEM_PERCENT"
+
+        # Generate warnings and suggestions
+        if (( ${CPU%.*} > CPU_THRESHOLD )); then
+            echo -e "\a"; say "Warning. High CPU usage."
+            log_data "⚠️ High CPU usage detected: $CPU%. Try closing unused apps."
+        fi
+        if (( ${MEM_PERCENT%.*} > MEMORY_THRESHOLD )); then
+            echo -e "\a"; say "Warning. High memory usage."
+            log_data "⚠️ High Memory usage detected: $MEM_PERCENT%. Consider closing memory-heavy applications."
+        fi
+        if (( DISK_USAGE > DISK_THRESHOLD )); then
+            echo -e "\a"; say "Warning. Disk usage critical."
+            log_data "⚠️ High Disk usage detected: $DISK_USAGE%. Consider clearing old files."
+        fi
+
+        sleep $UPDATE_INTERVAL
+    done
+}
+
 dashboard(){
-    echo "Launching system dashboard..."
+    collect_data &
+    echo "🔹 Starting Web Dashboard..."
+    cd "$(dirname "$0")"
+    python3 -m http.server $PORT > /dev/null 2>&1 &
+    echo "📡 Web server started at: http://localhost:$PORT"
+    echo "🖥️ Dashboard at: http://localhost:$PORT/dashboard.html"
+    echo -e "\033[0;31mPlease stop the server with --stop flag when done.\033[0m"
+    sleep 2
+}
 
-    # Start the monitoring script in background if not already running
-    if ! pgrep -f monitor_metrics.sh > /dev/null; then
-        ./monitor_metrics.sh &
-        echo "Monitoring started in background."
-    else
-        echo "Monitoring is already running."
-    fi
+manage_system_process() {
+    echo -e "${YELLOW}🔍 Searching for running 'system.sh' processes...\033[0m"
 
-    # Open the dashboard
-    if command -v xdg-open > /dev/null; then
-        xdg-open dashboard.html
-    elif command -v open > /dev/null; then
-        open dashboard.html
-    else
-        echo "Please open dashboard.html manually in your browser."
+  
+  # List all processes (excluding the grep line)
+  matches=$(ps aux | grep '[s]ystem.sh' |  grep 'dashboard' | grep -v grep | awk '{print $1, $2, $12, $13}')
+
+  if [[ -z "$matches" ]]; then
+    echo "✅ No running 'system.sh' processes found."
+    return
+  fi
+
+  echo "🧾 Found the following 'system.sh' processes:"
+  echo "$matches"
+  echo
+
+  echo "Choose an action:"
+  echo "1. Kill ALL processes"
+  echo "2. Kill a specific process by PID"
+  echo "3. Exit without killing anything"
+  read -p "Enter your choice (1/2/3): " choice
+
+  case "$choice" in
+    1)
+      echo "💥 Killing all 'system.sh' processes..."
+      pids=$(echo "$matches" | awk '{print $2}')
+      kill $pids
+    #   for PID in $PIDS; do
+    #     # Kill the whole process group
+    #     PGID=$(ps -o pgid= -p "$PID" | tr -d ' ')
+    #     if [ -n "$PGID" ]; then
+    #       kill -TERM -"$PGID" 2>/dev/null
+    #     fi
+    #   done
+      
+      echo "✅ All 'system.sh' processes terminated."
+      ;;
+    2)
+      read -p "🔢 Enter the PID of the process you want to kill: " pid
+      if echo "$matches" | awk '{print $2}' | grep -q "^$pid$"; then
+        kill "$pid"
+        echo "✅ Process with PID $pid has been terminated."
+      else
+        echo "❌ PID $pid not found in the running list."
+      fi
+      ;;
+    3)
+      echo "🚫 No action taken. Exiting."
+      ;;
+    *)
+      echo "❌ Invalid choice. Exiting."
+      ;;
+  esac
+}
+
+summary(){
+    header "Summary"
+    echo -e "System Doctor has completed its analysis and cleanup."
+    echo -e "A log file has been saved to: ${GREEN}$LOG_FILE${NC}"
+    echo -e "Critical files were backed up to: ${GREEN}$BACKUP_DIR${NC}"
+    if [ "$SEND_EMAIL" = true ]; then
+        echo -e "A report has been emailed to: ${GREEN}$EMAIL_RECIPIENT${NC}"
     fi
+    
+    log_message "Script completed successfully"
+    
+    echo
+    echo -e "${BLUE}==================================================${NC}"
+    echo -e "Completed at: $(date)"
+    echo -e "${BLUE}==================================================${NC}"
+}
+
+schedule_script(){
+    local script_path=$(readlink -f ./system.sh 2>/dev/null)
+    local script_dir=$(dirname "$script_path")
+    local log_path="$script_dir/schedule.log"
+    local command_name="--analyze-system-resources"
+
+    # run the script now with crontab
+    echo "🚀 Running script now..."
+    "$script_path" "$command_name" >/dev/null 2>&1
+    echo "✅ Script ran at $(date '+%Y-%m-%d %H:%M:%S')" >> "$log_path"
+    echo "Script run logged in $log_path"
+
+
+    (crontab -l 2>/dev/null; echo "0 6,18 * * * $script_path $command_name >/dev/null 2>&1 && echo 'Script ran at \$(date \"+\%Y-\%m-\%d \%H:\%M:\%S\")' >> $log_path") | crontab -
+
+    echo "✅ Scheduled '$script_path $command_name' to run twice daily at 06:00 and 18:00."
+    echo "Run timestamps will be appended to $log_path"
 }
 
 # Main function
@@ -514,29 +688,51 @@ main() {
             send_email_report
             ;;
 
+        system-process|--system-process)
+            header "Running System Process"
+            manage_system_process
+            ;;
+
         all|--all)
             setup_email
-            # header "Running Full System Doctor"
-            # create_backup
-            # clean_temp_files
-            # analyze_disk_usage
-            # analyze_system_resources
-            # suggest_cleanup
+            header "Running Full System Doctor"
+            create_backup
+            clean_temp_files
+            analyze_disk_usage
+            analyze_system_resources
+            suggest_cleanup
             send_email_report
+            dashboard
+            summary
+            ;;
+
+        stop|--stop)
+            header "Stopping Web Dashboard"
+            echo "Web server stopped."
+            pkill -f "http.server"
+            pkill -f "system.sh dashboard"
+            exit 0 
+            ;;
+
+        schedule|--schedule)
+            header "Scheduling Script"
+            schedule_script
             ;;
 
         help|--help|-h|"")
             echo "Usage: $0 {backup|clean|analyze-disk|analyze-resources|suggest|dashboard|full|help}"
             echo
             echo "Commands:"
-            echo "  backup             - Create backup of /etc, /home, /var"
-            echo "  clean              - Clean temporary files"
-            echo "  analyze-disk       - Show disk usage"
-            echo "  analyze-resources  - Show memory and CPU usage"
-            echo "  suggest            - Recommend cleanup options"
-            echo "  dashboard          - Show system summary"
-            echo "  full               - Run full diagnostic and cleanup"
-            echo "  help               - Show this help message"
+            echo "  --backup             - Create backup of /etc, /home, /var"
+            echo "  --clean              - Clean temporary files"
+            echo "  --analyze-disk       - Show disk usage"
+            echo "  --analyze-resources  - Show memory and CPU usage"
+            echo "  --suggest            - Recommend cleanup options"
+            echo "  --dashboard          - Show system summary"
+            echo "  --system-process     - Manage system processes"
+            echo "  --send-email         - Send email report"
+            echo "  --all               - Run full diagnostic and cleanup"
+            echo "  --help               - Show this help message"
             exit 1
             ;;
 
@@ -569,20 +765,7 @@ main() {
     # analyze_system_resources
     # suggest_cleanup
     
-    header "Summary"
-    echo -e "System Doctor has completed its analysis and cleanup."
-    echo -e "A log file has been saved to: ${GREEN}$LOG_FILE${NC}"
-    echo -e "Critical files were backed up to: ${GREEN}$BACKUP_DIR${NC}"
-    if [ "$SEND_EMAIL" = true ]; then
-        echo -e "A report has been emailed to: ${GREEN}$EMAIL_RECIPIENT${NC}"
-    fi
-    
-    log_message "Script completed successfully"
-    
-    echo
-    echo -e "${BLUE}==================================================${NC}"
-    echo -e "Completed at: $(date)"
-    echo -e "${BLUE}==================================================${NC}"
+
 }
 
 # Run the main function
